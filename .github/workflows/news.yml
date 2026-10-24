@@ -1,0 +1,29 @@
+name: Daily news digest
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC = 06:17 in Uganda (UTC+3). Edit to change the time.
+  workflow_dispatch:        # adds a "Run workflow" button so you can test by hand
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install feedparser requests
+
+      - run: python news_agent.py
+        env:
+          DIGEST_LANGUAGE: English          # change to French if you prefer
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
