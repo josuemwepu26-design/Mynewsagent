@@ -23,7 +23,8 @@ jobs:
 
       - run: python news_agent.py
         env:
-          DIGEST_LANGUAGE: English          # change to French if you prefer
+          DIGEST_LANGUAGE: English
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMTP_LOGIN: ${{ secrets.SMTP_LOGIN }}
+          SMTP_KEY: ${{ secrets.SMTP_KEY }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
