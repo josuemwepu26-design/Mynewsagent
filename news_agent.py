@@ -258,7 +258,7 @@ def raw_digest(items):
 # 3) SEND BY EMAIL (Gmail, to yourself)
 # --------------------------------------------------------------------------
 def send_email(text, subject):
-    """Email the digest to your own Gmail. Returns True on success."""
+    """Email the digest to your own Gmail. Retries and falls back to port 587."""
     if DRY_RUN:
         print("\n----- Email (dry run) -----\nSubject: " + subject + "\n\n" + text)
         return True
@@ -267,15 +267,30 @@ def send_email(text, subject):
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = GMAIL_ADDRESS
     msg.set_content(text)
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
-            s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            s.send_message(msg)
-        print("   Email sent")
-        return True
-    except (smtplib.SMTPException, OSError) as e:
-        print(f"   Email failed ({type(e).__name__}: {e})")
-        return False
+
+    # attempt 1: SSL on 465, attempt 2: STARTTLS on 587, attempt 3: 465 again
+    methods = [("smtp.gmail.com", 465, "ssl"), ("smtp.gmail.com", 587, "starttls")]
+    for attempt in range(3):
+        host, port, mode = methods[attempt % 2]
+        try:
+            if mode == "ssl":
+                s = smtplib.SMTP_SSL(host, port, timeout=60)
+            else:
+                s = smtplib.SMTP(host, port, timeout=60)
+                s.starttls()
+            with s:
+                s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+                s.send_message(msg)
+            print(f"   Email sent (port {port})")
+            return True
+        except smtplib.SMTPAuthenticationError as e:
+            # Wrong address or app password: retrying won't help
+            print(f"   Email login rejected ({e.smtp_code}). Check GMAIL_ADDRESS and GMAIL_APP_PASSWORD.")
+            return False
+        except (smtplib.SMTPException, OSError) as e:
+            print(f"   Email attempt {attempt + 1} failed on port {port} ({type(e).__name__}: {e})")
+            time.sleep(10)
+    return False
 
 
 # --------------------------------------------------------------------------
