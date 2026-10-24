@@ -25,5 +25,5 @@ jobs:
         env:
           DIGEST_LANGUAGE: English          # change to French if you prefer
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
-          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
