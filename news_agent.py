@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Free daily news digest -> your Gmail inbox.
+Free daily news digest -> your email (sent via Brevo SMTP).
 
-  News feeds  ->  Gemini free tier (summaries)  ->  Gmail (email to yourself)
+  News feeds  ->  Gemini free tier (summaries)  ->  Brevo SMTP (email to yourself)
 
 Runs on GitHub Actions (see news.yml). Secrets needed in your repo
 (Settings -> Secrets and variables -> Actions):
-  GEMINI_API_KEY      free key from Google AI Studio
-  GMAIL_ADDRESS       your Gmail address
-  GMAIL_APP_PASSWORD  16-character app password from myaccount.google.com/apppasswords
+  GEMINI_API_KEY  free key from Google AI Studio
+  SMTP_LOGIN      login shown on Brevo's SMTP & API page
+  SMTP_KEY        SMTP key generated in Brevo
+  MAIL_FROM       your verified sender address (your Gmail)
 """
 import calendar
 import os
@@ -41,8 +42,12 @@ LLM_MODELS = [m.strip() for m in os.getenv(
 LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")
 
 DRY_RUN = os.getenv("DRY_RUN") == "1"                # print instead of sending
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "").strip()
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
+
+SMTP_HOST = "smtp-relay.brevo.com"
+SMTP_PORT = 587
+SMTP_LOGIN = os.getenv("SMTP_LOGIN", "").strip()
+SMTP_KEY = os.getenv("SMTP_KEY", "").strip()
+MAIL_FROM = os.getenv("MAIL_FROM", "").strip()
 
 # --------------------------------------------------------------------------
 # WORDING
@@ -229,7 +234,7 @@ def call_llm(prompt):
             if r.status_code >= 500 and attempt == 0:
                 time.sleep(5)
                 continue
-            break                                    # daily quota gone / bad model -> next model
+            break                                    # model retired, quota gone, or still busy -> next model
     return None
 
 
@@ -255,48 +260,41 @@ def raw_digest(items):
 
 
 # --------------------------------------------------------------------------
-# 3) SEND BY EMAIL (Gmail, to yourself)
+# 3) SEND BY EMAIL (Brevo SMTP relay, to yourself)
 # --------------------------------------------------------------------------
 def send_email(text, subject):
-    """Email the digest to your own Gmail. Retries and falls back to port 587."""
+    """Email the digest through Brevo. Retries up to three times on network errors."""
     if DRY_RUN:
         print("\n----- Email (dry run) -----\nSubject: " + subject + "\n\n" + text)
         return True
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = GMAIL_ADDRESS
+    msg["From"] = f"News Digests <{MAIL_FROM}>"
+    msg["To"] = MAIL_FROM
     msg.set_content(text)
 
-    # attempt 1: SSL on 465, attempt 2: STARTTLS on 587, attempt 3: 465 again
-    methods = [("smtp.gmail.com", 465, "ssl"), ("smtp.gmail.com", 587, "starttls")]
     for attempt in range(3):
-        host, port, mode = methods[attempt % 2]
         try:
-            if mode == "ssl":
-                s = smtplib.SMTP_SSL(host, port, timeout=60)
-            else:
-                s = smtplib.SMTP(host, port, timeout=60)
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60) as s:
                 s.starttls()
-            with s:
-                s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+                s.login(SMTP_LOGIN, SMTP_KEY)
                 s.send_message(msg)
-            print(f"   Email sent (port {port})")
+            print("   Email sent via Brevo")
             return True
         except smtplib.SMTPAuthenticationError as e:
-            # Wrong address or app password: retrying won't help
-            print(f"   Email login rejected ({e.smtp_code}). Check GMAIL_ADDRESS and GMAIL_APP_PASSWORD.")
+            # Wrong login or key: retrying won't help
+            print(f"   Brevo login rejected ({e.smtp_code}). Check SMTP_LOGIN and SMTP_KEY.")
             return False
         except (smtplib.SMTPException, OSError) as e:
-            print(f"   Email attempt {attempt + 1} failed on port {port} ({type(e).__name__}: {e})")
+            print(f"   Email attempt {attempt + 1} failed ({type(e).__name__}: {e})")
             time.sleep(10)
     return False
 
 
 # --------------------------------------------------------------------------
 def main():
-    if not DRY_RUN and not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD):
-        sys.exit("Missing GMAIL_ADDRESS or GMAIL_APP_PASSWORD secret.")
+    if not DRY_RUN and not (SMTP_LOGIN and SMTP_KEY and MAIL_FROM):
+        sys.exit("Missing SMTP_LOGIN, SMTP_KEY or MAIL_FROM secret.")
     today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y")
     sections, any_news = [], False
     for region in REGIONS:
