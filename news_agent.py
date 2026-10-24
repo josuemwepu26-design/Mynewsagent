@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Free daily news digest -> your WhatsApp.
+Free daily news digest -> your Gmail inbox.
 
-  News feeds  ->  Gemini free tier (summaries)  ->  CallMeBot (WhatsApp to yourself)
+  News feeds  ->  Gemini free tier (summaries)  ->  Gmail (email to yourself)
 
 Runs on GitHub Actions (see news.yml). Secrets needed in your repo
 (Settings -> Secrets and variables -> Actions):
-  GEMINI_API_KEY    free key from Google AI Studio
-  CALLMEBOT_PHONE   your WhatsApp number with country code, e.g. +2567XXXXXXXX
-  CALLMEBOT_APIKEY  the key CallMeBot sends you on WhatsApp
+  GEMINI_API_KEY      free key from Google AI Studio
+  GMAIL_ADDRESS       your Gmail address
+  GMAIL_APP_PASSWORD  16-character app password from myaccount.google.com/apppasswords
 """
 import calendar
 import os
 import re
+import smtplib
 import sys
 import time
 from datetime import datetime
+from email.message import EmailMessage
 from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
@@ -30,7 +32,6 @@ TIMEZONE = "Africa/Kampala"
 MAX_AGE_HOURS = 36       # ignore headlines older than this
 PER_FEED = 6             # max headlines kept per feed
 PER_REGION = 40          # max headlines sent to the AI per region
-MAX_MSG_CHARS = 1800     # size of one WhatsApp message part
 
 # AI provider: any OpenAI-compatible API works (default = Gemini free tier).
 # To switch provider later, change only these three settings.
@@ -40,8 +41,8 @@ LLM_MODELS = [m.strip() for m in os.getenv(
 LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")
 
 DRY_RUN = os.getenv("DRY_RUN") == "1"                # print instead of sending
-PHONE = os.getenv("CALLMEBOT_PHONE", "").replace(" ", "")
-CB_KEY = os.getenv("CALLMEBOT_APIKEY", "")
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "").strip()
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
 
 # --------------------------------------------------------------------------
 # WORDING
@@ -175,7 +176,7 @@ def build_prompt(region, items, today):
     lines = [f"{n}. [{i['topic'] or 'general'}] {i['title']} ({i['source']})"
              for n, i in enumerate(items, 1)]
     return (
-        f"You edit a personal WhatsApp news digest.\n"
+        f"You edit a personal news digest.\n"
         f"Region: {region['name']}. Date: {today}. Write in {LANGUAGE}.\n\n"
         f"Below are today's headlines (number, topic hint, headline, source). "
         f"They may be in French or English.\n\n"
@@ -185,7 +186,7 @@ def build_prompt(region, items, today):
         f"- 2 to 3 bullets per heading, most important first. Merge headlines about the same story.\n"
         f"- Each bullet: one plain sentence of at most 25 words, then the source in brackets.\n"
         f"- If a heading has nothing relevant, write: • {L['nothing']}\n"
-        f"- WhatsApp formatting only: headings in single asterisks like *{heads[0]}*, "
+        f"- Plain text only: headings in single asterisks like *{heads[0]}*, "
         f"bullets start with \"• \". No markdown headers, tables or links.\n"
         f"- Output only the digest, no intro or outro.\n\n"
         f"Headlines:\n" + "\n".join(lines)
@@ -233,7 +234,7 @@ def call_llm(prompt):
 
 
 def clean(text):
-    """Turn typical markdown into WhatsApp formatting."""
+    """Turn typical markdown into plain-text formatting."""
     text = text.replace("```", "").replace("**", "*")
     text = re.sub(r"(?m)^#+\s*(.+?)\s*$", r"*\1*", text)
     text = re.sub(r"(?m)^\s*[-*]\s+", "• ", text)
@@ -242,7 +243,7 @@ def clean(text):
 
 def raw_digest(items):
     """Fallback when the AI is unavailable: grouped plain headlines."""
-    out = ["_" + L["raw"] + "_"]
+    out = ["(" + L["raw"] + ")"]
     for key, label in zip(TOPICS, L["heads"]):
         picks = [i for i in items if i["topic"] == key][:3]
         if picks:
@@ -254,56 +255,36 @@ def raw_digest(items):
 
 
 # --------------------------------------------------------------------------
-# 3) SEND TO WHATSAPP (CallMeBot, free, personal use)
+# 3) SEND BY EMAIL (Gmail, to yourself)
 # --------------------------------------------------------------------------
-def split_text(text, limit=MAX_MSG_CHARS):
-    parts, cur = [], ""
-    for line in text.split("\n"):
-        while len(line) > limit:
-            if cur:
-                parts.append(cur)
-                cur = ""
-            parts.append(line[:limit])
-            line = line[limit:]
-        if cur and len(cur) + len(line) + 1 > limit:
-            parts.append(cur)
-            cur = line
-        else:
-            cur = f"{cur}\n{line}" if cur else line
-    if cur:
-        parts.append(cur)
-    return parts
-
-
-def send_whatsapp(text):
-    """Send text to your own WhatsApp. Returns True if every part was accepted."""
-    text = text.replace("US$", "USD ").replace("$", "USD ")   # CallMeBot mangles "$"
-    all_ok = True
-    for part in split_text(text):
-        if DRY_RUN:
-            print("\n----- WhatsApp message (dry run) -----\n" + part)
-            continue
-        try:
-            r = requests.get("https://api.callmebot.com/whatsapp.php",
-                             params={"phone": PHONE, "text": part, "apikey": CB_KEY}, timeout=60)
-            reply = " ".join(re.sub(r"<[^>]+>", " ", r.text).split())[:160]
-            ok = r.status_code == 200 and not reply.lower().startswith(("error", "invalid"))
-            print(f"   WhatsApp: HTTP {r.status_code} {reply}")
-        except requests.RequestException as e:
-            ok = False
-            print(f"   WhatsApp send failed ({type(e).__name__})")
-        all_ok &= ok
-        time.sleep(6)                    # gentle on the free service, keeps order
-    return all_ok
+def send_email(text, subject):
+    """Email the digest to your own Gmail. Returns True on success."""
+    if DRY_RUN:
+        print("\n----- Email (dry run) -----\nSubject: " + subject + "\n\n" + text)
+        return True
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = GMAIL_ADDRESS
+    msg.set_content(text)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
+            s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            s.send_message(msg)
+        print("   Email sent")
+        return True
+    except (smtplib.SMTPException, OSError) as e:
+        print(f"   Email failed ({type(e).__name__}: {e})")
+        return False
 
 
 # --------------------------------------------------------------------------
 def main():
-    if not DRY_RUN and not (PHONE and CB_KEY):
-        sys.exit("Missing CALLMEBOT_PHONE or CALLMEBOT_APIKEY secret.")
+    if not DRY_RUN and not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD):
+        sys.exit("Missing GMAIL_ADDRESS or GMAIL_APP_PASSWORD secret.")
     today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y")
-    all_ok, any_news = True, False
-    for n, region in enumerate(REGIONS):
+    sections, any_news = [], False
+    for region in REGIONS:
         print(f"\n== {region['name']}")
         items = collect(region)
         if items:
@@ -313,10 +294,10 @@ def main():
             time.sleep(8)                # stay under free-tier per-minute limits
         else:
             body = L["none"]
-        text = f"{region['emoji']} *{region['name']}*\n\n{body}"
-        if n == 0:
-            text = f"📰 *{L['digest']} {today}*\n\n" + text
-        all_ok &= send_whatsapp(text)
+        sections.append(f"{region['emoji']} {region['name']}\n\n{body}")
+
+    subject = f"{L['digest']} {today}"
+    all_ok = send_email("\n\n".join(sections), subject)
     sys.exit(0 if (all_ok and any_news) else 1)
 
 
