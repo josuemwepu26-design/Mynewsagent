@@ -37,7 +37,7 @@ PER_REGION = 40          # max headlines sent to the AI per region
 # To switch provider later, change only these three settings.
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
 LLM_MODELS = [m.strip() for m in os.getenv(
-    "LLM_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-flash-latest").split(",") if m.strip()]
+    "LLM_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite,gemini-flash-latest").split(",") if m.strip()]
 LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")
 
 DRY_RUN = os.getenv("DRY_RUN") == "1"                # print instead of sending
