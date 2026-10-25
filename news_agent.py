@@ -2,7 +2,7 @@
 """
 Free daily news digest -> your email (sent via Brevo SMTP).
 
-  News feeds  ->  Gemini free tier (summaries)  ->  Brevo SMTP (email to yourself)
+  News feeds  ->  Gemini free tier (summaries)  ->  Brevo SMTP (formatted email to yourself)
 
 Runs on GitHub Actions (see news.yml). Secrets needed in your repo
 (Settings -> Secrets and variables -> Actions):
@@ -19,6 +19,7 @@ import sys
 import time
 from datetime import datetime
 from email.message import EmailMessage
+from html import escape as esc
 from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
@@ -49,21 +50,32 @@ SMTP_LOGIN = os.getenv("SMTP_LOGIN", "").strip()
 SMTP_KEY = os.getenv("SMTP_KEY", "").strip()
 MAIL_FROM = os.getenv("MAIL_FROM", "").strip()
 
+# Email styling
+FONT_SERIF = "Georgia, 'Times New Roman', serif"
+FONT_SANS = "Arial, Helvetica, sans-serif"
+INK = "#1f1f1f"
+MUTED = "#7a7568"
+ACCENT = "#8a6d3b"
+RULE = "#d9d4c7"
+PAPER = "#f4f1ea"
+
 # --------------------------------------------------------------------------
 # WORDING
 # --------------------------------------------------------------------------
 TXT = {
     "English": {
         "heads": ["Politics", "Social", "Economy", "Technology"],
-        "top": "Top stories", "digest": "News digest",
-        "raw": "(AI summary unavailable, showing headlines)",
+        "top": "Top stories", "digest": "News digest", "brief": "Daily Briefing",
+        "raw": "AI summary unavailable, showing headlines",
         "none": "No headlines found today.", "nothing": "Nothing notable today.",
+        "footer": "Compiled automatically from public news sources. Each item cites its source.",
     },
     "French": {
         "heads": ["Politique", "Social", "Économie", "Technologie"],
-        "top": "À la une", "digest": "Revue de presse",
-        "raw": "(Résumé IA indisponible, titres bruts)",
+        "top": "À la une", "digest": "Revue de presse", "brief": "Revue quotidienne",
+        "raw": "Résumé IA indisponible, titres bruts",
         "none": "Aucun titre trouvé aujourd'hui.", "nothing": "Rien de notable aujourd'hui.",
+        "footer": "Compilé automatiquement à partir de sources publiques. Chaque information cite sa source.",
     },
 }
 L = TXT.get(LANGUAGE, TXT["English"])
@@ -239,7 +251,7 @@ def call_llm(prompt):
 
 
 def clean(text):
-    """Turn typical markdown into plain-text formatting."""
+    """Turn typical markdown into the simple format the parser expects."""
     text = text.replace("```", "").replace("**", "*")
     text = re.sub(r"(?m)^#+\s*(.+?)\s*$", r"*\1*", text)
     text = re.sub(r"(?m)^\s*[-*]\s+", "• ", text)
@@ -260,18 +272,125 @@ def raw_digest(items):
 
 
 # --------------------------------------------------------------------------
-# 3) SEND BY EMAIL (Brevo SMTP relay, to yourself)
+# 3) PARSE the digest into structure, so it can be styled
 # --------------------------------------------------------------------------
-def send_email(text, subject):
+def split_source(bullet):
+    """'Some headline (Source Name)' -> ('Some headline', 'Source Name')."""
+    m = re.search(r"\s*[\[(]([^\[\]()]{2,60})[\]\)]\s*$", bullet)
+    if m:
+        return bullet[:m.start()].strip(), m.group(1).strip()
+    return bullet.strip(), ""
+
+
+def parse_digest(text):
+    """Return (blocks, note). blocks = [(heading, [(text, source), ...]), ...]."""
+    blocks, note = [], None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = re.fullmatch(r"\*(.+?)\*", s)
+        if m:
+            blocks.append([m.group(1).strip(), []])
+            continue
+        if s.startswith("•"):
+            if not blocks:
+                blocks.append(["", []])
+            blocks[-1][1].append(split_source(s.lstrip("•").strip()))
+            continue
+        if s.startswith("(") and s.endswith(")") and note is None:
+            note = s[1:-1]
+    return [(h, b) for h, b in blocks if b], note
+
+
+# --------------------------------------------------------------------------
+# 4) BUILD the email (HTML + plain-text fallback)
+# --------------------------------------------------------------------------
+def html_region(region, blocks, note):
+    out = [
+        f'<h2 style="margin:40px 0 4px;font-family:{FONT_SERIF};font-size:20px;font-weight:bold;color:{INK};">'
+        f'{esc(region["emoji"])}&nbsp;{esc(region["name"])}</h2>',
+        f'<div style="height:1px;background:{RULE};margin-bottom:6px;"></div>',
+    ]
+    if note:
+        out.append(f'<p style="margin:10px 0;font-family:{FONT_SERIF};font-style:italic;'
+                   f'font-size:13px;color:{MUTED};">{esc(note)}</p>')
+    if not blocks:
+        out.append(f'<p style="margin:10px 0;font-family:{FONT_SERIF};font-size:15px;color:{MUTED};">'
+                   f'{esc(L["none"])}</p>')
+    for heading, bullets in blocks:
+        if heading:
+            out.append(f'<h3 style="margin:22px 0 8px;font-family:{FONT_SANS};font-size:11px;'
+                       f'letter-spacing:2px;text-transform:uppercase;color:{ACCENT};">{esc(heading)}</h3>')
+        out.append('<ul style="margin:0;padding-left:18px;">')
+        for text, src in bullets:
+            src_html = (f' <span style="color:{MUTED};font-size:12px;font-style:italic;">'
+                        f'&mdash; {esc(src)}</span>') if src else ""
+            out.append(f'<li style="margin:0 0 10px;font-family:{FONT_SERIF};font-size:15px;'
+                       f'line-height:1.55;color:{INK};">{esc(text)}{src_html}</li>')
+        out.append('</ul>')
+    return "".join(out)
+
+
+def build_html(regions_out, long_date):
+    body = "".join(html_region(r, b, n) for r, b, n in regions_out)
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:{PAPER};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{PAPER};">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0"
+       style="max-width:640px;width:100%;background:#ffffff;">
+<tr><td style="padding:44px 48px;color:{INK};">
+  <div style="font-family:{FONT_SANS};font-size:11px;letter-spacing:3px;text-transform:uppercase;color:{ACCENT};">{esc(L["brief"])}</div>
+  <h1 style="margin:10px 0 4px;font-family:{FONT_SERIF};font-size:34px;font-weight:normal;color:{INK};">{esc(L["digest"])}</h1>
+  <div style="font-family:{FONT_SERIF};font-size:14px;color:{MUTED};">{esc(long_date)}</div>
+  <div style="height:2px;background:{INK};margin:18px 0 4px;"></div>
+  {body}
+  <div style="margin-top:40px;padding-top:14px;border-top:1px solid {RULE};font-family:{FONT_SANS};
+              font-size:11px;line-height:1.5;color:#8a8578;">{esc(L["footer"])}</div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+
+
+def build_text(regions_out, long_date):
+    """Plain-text version for email apps that don't show HTML."""
+    lines = [L["digest"].upper(), long_date, "=" * 40, ""]
+    for region, blocks, note in regions_out:
+        lines += [f"{region['emoji']} {region['name']}", "-" * 40]
+        if note:
+            lines.append(note)
+        if not blocks:
+            lines.append(L["none"])
+        for heading, bullets in blocks:
+            if heading:
+                lines += ["", heading.upper()]
+            for text, src in bullets:
+                lines.append(f"  - {text}" + (f" ({src})" if src else ""))
+        lines.append("")
+    lines.append(L["footer"])
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# 5) SEND BY EMAIL (Brevo SMTP relay, to yourself)
+# --------------------------------------------------------------------------
+def send_email(text, html, subject):
     """Email the digest through Brevo. Retries up to three times on network errors."""
     if DRY_RUN:
         print("\n----- Email (dry run) -----\nSubject: " + subject + "\n\n" + text)
         return True
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = f"News Digests <{MAIL_FROM}>"
+    msg["From"] = f"News Digest <{MAIL_FROM}>"
     msg["To"] = MAIL_FROM
     msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
 
     for attempt in range(3):
         try:
@@ -295,22 +414,30 @@ def send_email(text, subject):
 def main():
     if not DRY_RUN and not (SMTP_LOGIN and SMTP_KEY and MAIL_FROM):
         sys.exit("Missing SMTP_LOGIN, SMTP_KEY or MAIL_FROM secret.")
-    today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y")
-    sections, any_news = [], False
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    today = now.strftime("%d/%m/%Y")
+    long_date = now.strftime("%A, %d %B %Y")
+
+    regions_out, any_news = [], False
     for region in REGIONS:
         print(f"\n== {region['name']}")
         items = collect(region)
         if items:
             any_news = True
             summary = call_llm(build_prompt(region, items, today))
-            body = clean(summary) if summary else raw_digest(items)
-            time.sleep(8)                # stay under free-tier per-minute limits
+            if summary:
+                blocks, note = parse_digest(clean(summary))
+            else:
+                blocks, note = parse_digest(raw_digest(items))
+            time.sleep(8)               # stay under free-tier per-minute limits
         else:
-            body = L["none"]
-        sections.append(f"{region['emoji']} {region['name']}\n\n{body}")
+            blocks, note = [], None
+        regions_out.append((region, blocks, note))
 
-    subject = f"{L['digest']} {today}"
-    all_ok = send_email("\n\n".join(sections), subject)
+    subject = f"{L['digest']} · {today}"
+    text = build_text(regions_out, long_date)
+    html = build_html(regions_out, long_date)
+    all_ok = send_email(text, html, subject)
     sys.exit(0 if (all_ok and any_news) else 1)
 
 
